@@ -1,0 +1,7 @@
+.DS_Store
+.build/
+build/
+dist/
+Assets/AppIcon.icns
+Assets/AppIcon.iconset/
+Assets/app-icon-source.png

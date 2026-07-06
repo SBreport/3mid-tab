@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="210" y1="104" x2="814" y2="920" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#49c7ff"/>
+      <stop offset=".52" stop-color="#576bff"/>
+      <stop offset="1" stop-color="#b936f0"/>
+    </linearGradient>
+    <radialGradient id="finger" cx="35%" cy="22%" r="78%">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset=".34" stop-color="#dff8ff"/>
+      <stop offset=".68" stop-color="#8ba8ff"/>
+      <stop offset="1" stop-color="#623af0"/>
+    </radialGradient>
+    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="16"/>
+    </filter>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="218" fill="url(#bg)"/>
+  <ellipse cx="512" cy="750" rx="286" ry="54" fill="#111b55" opacity=".22" filter="url(#soft)"/>
+  <circle cx="370" cy="456" r="126" fill="url(#finger)" opacity=".96"/>
+  <circle cx="512" cy="332" r="126" fill="url(#finger)" opacity=".96"/>
+  <circle cx="654" cy="456" r="126" fill="url(#finger)" opacity=".96"/>
+  <path d="M318 610c0-92 75-167 167-167h54c92 0 167 75 167 167v10c0 59-48 107-107 107H425c-59 0-107-48-107-107v-10z" fill="url(#finger)" opacity=".92"/>
+  <path d="M196 268c0-80 65-145 145-145h342c80 0 145 65 145 145" fill="none" stroke="#ffffff" stroke-opacity=".18" stroke-width="10" stroke-linecap="round"/>
+</svg>
