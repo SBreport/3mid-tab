@@ -41,6 +41,13 @@ chmod +x Scripts/build-app.sh
 open build/3mid-tab.app
 ```
 
+For local development, install and run the app from `/Applications` so Accessibility permission matches the installed app path:
+
+```sh
+chmod +x Scripts/install-local.sh
+./Scripts/install-local.sh
+```
+
 ## Build a DMG
 
 ```sh
