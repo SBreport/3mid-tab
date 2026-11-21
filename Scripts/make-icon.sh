@@ -11,7 +11,14 @@ rm -rf "$ICONSET"
 mkdir -p "$ICONSET"
 
 rm -rf "$ROOT_DIR/Assets/app-icon-source.png" "$ROOT_DIR/Assets/app-icon.svg.png"
-qlmanage -t -s 1024 -o "$ROOT_DIR/Assets" "$SVG" >/dev/null 2>&1
+if ! qlmanage -t -s 1024 -o "$ROOT_DIR/Assets" "$SVG" >/dev/null 2>&1; then
+  if [ -f "$ICNS" ]; then
+    echo "Using existing $ICNS"
+    exit 0
+  fi
+  echo "Unable to render $SVG and no existing icon is available" >&2
+  exit 1
+fi
 mv "$ROOT_DIR/Assets/app-icon.svg.png" "$SOURCE"
 
 sips -z 16 16     "$SOURCE" --out "$ICONSET/icon_16x16.png" >/dev/null

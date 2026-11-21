@@ -27,6 +27,7 @@
 
 @interface MiddleClickEmitter : NSObject
 - (void)middleClick;
+- (void)middleClickAt:(CGPoint)location;
 @end
 
 @implementation MiddleClickEmitter
@@ -37,6 +38,10 @@
         CFRelease(current);
     }
 
+    [self middleClickAt:location];
+}
+
+- (void)middleClickAt:(CGPoint)location {
     [self postType:kCGEventOtherMouseDown at:location];
     usleep(12000);
     [self postType:kCGEventOtherMouseUp at:location];
@@ -60,6 +65,144 @@
     CFRelease(event);
 }
 @end
+
+@interface MiddleButtonAutoScroller : NSObject
+- (BOOL)start;
+- (CGEventRef)handleEvent:(CGEventRef)event type:(CGEventType)type;
+- (void)recoverEventTap;
+@property (nonatomic, assign, getter=isEnabled) BOOL enabled;
+@end
+
+static CGEventRef AutoScrollEventTapCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *refcon);
+
+@implementation MiddleButtonAutoScroller {
+    CFMachPortRef _eventTap;
+    CFRunLoopSourceRef _runLoopSource;
+    BOOL _middleButtonDown;
+    BOOL _moved;
+    CGPoint _lastLocation;
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _enabled = NO;
+    }
+    return self;
+}
+
+- (BOOL)start {
+    CGEventMask mask = CGEventMaskBit(kCGEventOtherMouseDown) |
+                       CGEventMaskBit(kCGEventOtherMouseUp) |
+                       CGEventMaskBit(kCGEventOtherMouseDragged) |
+                       CGEventMaskBit(kCGEventMouseMoved);
+    _eventTap = CGEventTapCreate(
+        kCGSessionEventTap,
+        kCGHeadInsertEventTap,
+        kCGEventTapOptionDefault,
+        mask,
+        AutoScrollEventTapCallback,
+        (__bridge void *)self
+    );
+    if (!_eventTap) {
+        return NO;
+    }
+
+    _runLoopSource = CFMachPortCreateRunLoopSource(NULL, _eventTap, 0);
+    CFRunLoopAddSource(CFRunLoopGetMain(), _runLoopSource, kCFRunLoopCommonModes);
+    CGEventTapEnable(_eventTap, true);
+    return YES;
+}
+
+- (CGEventRef)handleEvent:(CGEventRef)event type:(CGEventType)type {
+    if (!self.enabled) {
+        return event;
+    }
+
+    if (_middleButtonDown && type != kCGEventOtherMouseUp &&
+        !CGEventSourceButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonCenter)) {
+        _middleButtonDown = NO;
+        _moved = NO;
+    }
+
+    if (type == kCGEventOtherMouseDown &&
+        CGEventGetIntegerValueField(event, kCGMouseEventButtonNumber) == kCGMouseButtonCenter) {
+        _middleButtonDown = YES;
+        _moved = NO;
+        _lastLocation = CGEventGetLocation(event);
+        return event;
+    }
+
+    if (type == kCGEventOtherMouseUp &&
+        CGEventGetIntegerValueField(event, kCGMouseEventButtonNumber) == kCGMouseButtonCenter &&
+        _middleButtonDown) {
+        _middleButtonDown = NO;
+        return _moved ? NULL : event;
+    }
+
+    if (_middleButtonDown &&
+        (type == kCGEventMouseMoved || type == kCGEventOtherMouseDragged)) {
+        CGPoint location = CGEventGetLocation(event);
+        CGFloat dx = location.x - _lastLocation.x;
+        CGFloat dy = location.y - _lastLocation.y;
+        _lastLocation = location;
+
+        if (fabs(dx) < 0.5 && fabs(dy) < 0.5) {
+            return NULL;
+        }
+
+        _moved = YES;
+        int32_t vertical = (int32_t)llround(-dy);
+        int32_t horizontal = (int32_t)llround(dx);
+        if (vertical != 0 || horizontal != 0) {
+            CGEventRef scroll = CGEventCreateScrollWheelEvent(
+                NULL,
+                kCGScrollEventUnitPixel,
+                2,
+                vertical,
+                horizontal
+            );
+            if (scroll) {
+                CGEventPost(kCGHIDEventTap, scroll);
+                CFRelease(scroll);
+            }
+        }
+        return event;
+    }
+
+    return event;
+}
+
+- (void)recoverEventTap {
+    _middleButtonDown = NO;
+    _moved = NO;
+    if (_eventTap && !CGEventTapIsEnabled(_eventTap)) {
+        CGEventTapEnable(_eventTap, true);
+    }
+}
+
+- (void)dealloc {
+    if (_eventTap) {
+        CGEventTapEnable(_eventTap, false);
+    }
+    if (_runLoopSource) {
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), _runLoopSource, kCFRunLoopCommonModes);
+        CFRelease(_runLoopSource);
+    }
+    if (_eventTap) {
+        CFRelease(_eventTap);
+    }
+}
+@end
+
+static CGEventRef AutoScrollEventTapCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *refcon) {
+    MiddleButtonAutoScroller *scroller = (__bridge MiddleButtonAutoScroller *)refcon;
+    if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
+        [scroller recoverEventTap];
+        return event;
+    }
+    return [scroller handleEvent:event type:type];
+}
 
 @interface ThreeFingerTapRecognizer : NSObject
 - (BOOL)handleTouches:(NSSet<NSTouch *> *)touches;
@@ -301,6 +444,8 @@ typedef void (*MTDeviceStopFn)(MTDeviceRef device);
 @interface GlobalMultitouchMonitor : NSObject
 - (instancetype)initWithTapHandler:(dispatch_block_t)tapHandler;
 - (BOOL)start;
+- (BOOL)restart;
+- (void)recordFrame;
 @end
 
 static GlobalMultitouchMonitor *ActiveGlobalMonitor;
@@ -309,17 +454,24 @@ static GlobalMultitouchMonitor *ActiveGlobalMonitor;
     dispatch_block_t _tapHandler;
     void *_framework;
     CFArrayRef _devices;
+    MTDeviceCreateListFn _createList;
     MTRegisterContactFrameCallbackFn _registerCallback;
     MTDeviceStartFn _startDevice;
     MTDeviceStopFn _stopDevice;
     NSDate *_startedAt;
     MTDeviceRef _activeDevice;
+    NSTimer *_watchdogTimer;
+    CFAbsoluteTime _lastFrameAt;
 }
 
 static const NSTimeInterval GlobalTapMaxDuration = 0.80;
+static const NSTimeInterval GlobalMonitorWatchdogInterval = 2.0;
+static const NSTimeInterval GlobalMonitorStaleAfter = 6.0;
 
 static int GlobalMultitouchCallback(MTDeviceRef device, void *touches, int touchCount, double timestamp, int frame) {
-    [ActiveGlobalMonitor handleDevice:device touchCount:touchCount];
+    GlobalMultitouchMonitor *monitor = ActiveGlobalMonitor;
+    [monitor recordFrame];
+    [monitor handleDevice:device touchCount:touchCount];
     return 0;
 }
 
@@ -337,21 +489,54 @@ static int GlobalMultitouchCallback(MTDeviceRef device, void *touches, int touch
         return NO;
     }
 
-    MTDeviceCreateListFn createList = (MTDeviceCreateListFn)dlsym(_framework, "MTDeviceCreateList");
+    _createList = (MTDeviceCreateListFn)dlsym(_framework, "MTDeviceCreateList");
     _registerCallback = (MTRegisterContactFrameCallbackFn)dlsym(_framework, "MTRegisterContactFrameCallback");
     _startDevice = (MTDeviceStartFn)dlsym(_framework, "MTDeviceStart");
     _stopDevice = (MTDeviceStopFn)dlsym(_framework, "MTDeviceStop");
 
-    if (!createList || !_registerCallback || !_startDevice || !_stopDevice) {
-        return NO;
-    }
-
-    _devices = createList();
-    if (!_devices) {
+    if (!_createList || !_registerCallback || !_startDevice || !_stopDevice) {
         return NO;
     }
 
     ActiveGlobalMonitor = self;
+    BOOL started = [self restart];
+    __weak GlobalMultitouchMonitor *weakSelf = self;
+    _watchdogTimer = [NSTimer scheduledTimerWithTimeInterval:GlobalMonitorWatchdogInterval
+                                                       repeats:YES
+                                                         block:^(NSTimer *timer) {
+        GlobalMultitouchMonitor *strongSelf = weakSelf;
+        if (!strongSelf) {
+            [timer invalidate];
+            return;
+        }
+
+        CFAbsoluteTime elapsed = CFAbsoluteTimeGetCurrent() - strongSelf->_lastFrameAt;
+        if (elapsed > GlobalMonitorStaleAfter) {
+            [strongSelf restart];
+        }
+    }];
+    return started;
+}
+
+- (BOOL)restart {
+    _startedAt = nil;
+    _activeDevice = NULL;
+    _lastFrameAt = CFAbsoluteTimeGetCurrent();
+
+    if (_devices && _stopDevice) {
+        CFIndex oldCount = CFArrayGetCount(_devices);
+        for (CFIndex i = 0; i < oldCount; i++) {
+            _stopDevice((MTDeviceRef)CFArrayGetValueAtIndex(_devices, i));
+        }
+        CFRelease(_devices);
+        _devices = NULL;
+    }
+
+    _devices = _createList ? _createList() : NULL;
+    if (!_devices) {
+        return NO;
+    }
+
     CFIndex count = CFArrayGetCount(_devices);
     for (CFIndex i = 0; i < count; i++) {
         MTDeviceRef device = (MTDeviceRef)CFArrayGetValueAtIndex(_devices, i);
@@ -360,6 +545,10 @@ static int GlobalMultitouchCallback(MTDeviceRef device, void *touches, int touch
     }
 
     return count > 0;
+}
+
+- (void)recordFrame {
+    _lastFrameAt = CFAbsoluteTimeGetCurrent();
 }
 
 - (void)handleDevice:(MTDeviceRef)device touchCount:(int)touchCount {
@@ -390,6 +579,7 @@ static int GlobalMultitouchCallback(MTDeviceRef device, void *touches, int touch
 }
 
 - (void)dealloc {
+    [_watchdogTimer invalidate];
     if (_devices && _stopDevice) {
         CFIndex count = CFArrayGetCount(_devices);
         for (CFIndex i = 0; i < count; i++) {
@@ -416,6 +606,8 @@ static int GlobalMultitouchCallback(MTDeviceRef device, void *touches, int touch
     NSWindow *_window;
     TouchPadView *_touchView;
     GlobalMultitouchMonitor *_globalMonitor;
+    MiddleButtonAutoScroller *_autoScroller;
+    NSMenuItem *_autoScrollMenuItem;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
@@ -423,6 +615,7 @@ static int GlobalMultitouchCallback(MTDeviceRef device, void *touches, int touch
     [self setupStatusItem];
     [self setupWindow];
     [self setupGlobalMonitor];
+    [self setupAutoScroller];
     [PermissionManager requestAccessibilityIfNeeded];
 }
 
@@ -436,7 +629,10 @@ static int GlobalMultitouchCallback(MTDeviceRef device, void *touches, int touch
     NSMenu *menu = [[NSMenu alloc] init];
     [menu addItemWithTitle:@"Show Touch Pad" action:@selector(showWindow) keyEquivalent:@"s"];
     [menu addItemWithTitle:@"Toggle Enabled" action:@selector(toggleEnabled) keyEquivalent:@"e"];
+    _autoScrollMenuItem = [menu addItemWithTitle:@"Mouse Auto Scroll (Middle + Move)" action:@selector(toggleAutoScroll:) keyEquivalent:@""];
+    _autoScrollMenuItem.state = NSControlStateValueOff;
     [menu addItem:[NSMenuItem separatorItem]];
+    [menu addItemWithTitle:@"Restart 3mid-tab" action:@selector(restart) keyEquivalent:@"r"];
     [menu addItemWithTitle:@"Quit" action:@selector(quit) keyEquivalent:@"q"];
     _statusItem.menu = menu;
 }
@@ -466,6 +662,26 @@ static int GlobalMultitouchCallback(MTDeviceRef device, void *touches, int touch
     }];
 
     [_globalMonitor start];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(screenParametersChanged:)
+                                                 name:NSApplicationDidChangeScreenParametersNotification
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(screenParametersChanged:)
+                                                 name:NSWorkspaceDidWakeNotification
+                                               object:NSWorkspace.sharedWorkspace];
+}
+
+- (void)screenParametersChanged:(NSNotification *)notification {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self->_globalMonitor restart];
+    });
+}
+
+- (void)setupAutoScroller {
+    _autoScroller = [[MiddleButtonAutoScroller alloc] init];
+    [_autoScroller start];
 }
 
 - (void)showWindow {
@@ -477,8 +693,26 @@ static int GlobalMultitouchCallback(MTDeviceRef device, void *touches, int touch
     _touchView.enabled = !_touchView.enabled;
 }
 
+- (void)toggleAutoScroll:(NSMenuItem *)sender {
+    _autoScroller.enabled = !_autoScroller.isEnabled;
+    sender.state = _autoScroller.isEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+}
+
 - (void)quit {
     [NSApp terminate:nil];
+}
+
+- (void)restart {
+    NSString *appPath = NSBundle.mainBundle.bundlePath;
+    NSTask *task = [[NSTask alloc] init];
+    task.launchPath = @"/bin/sh";
+    task.arguments = @[@"-c", @"sleep 0.3; exec /usr/bin/open \"$1\"", @"3mid-tab-restart", appPath];
+    [task launch];
+    [NSApp terminate:nil];
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 @end
 
